@@ -1,0 +1,13 @@
+client_downloads/
+server_files/
+__pycache__/
+
+# Large test files
+*.pdf
+*.zip
+*.png
+*.mp4
+*.bin
+
+# Or if you want to ignore by filename specifically
+test_large_file.txt
