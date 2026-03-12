@@ -1,0 +1,229 @@
+﻿Fundamentals of Computer Networking (CS 5700) – Course Project (Spring 2026)
+
+
+	 A white letter on a black background
+
+Description automatically generated 
+
+	
+
+
+
+Introduction
+ 
+The goal of this programming project is to familiarize you with the low-level operations of the Internet protocol stack as well as reliable data transfer. So far, you have written simple client-server applications in which the server and client implemented some basic functionalities. You have worked with both UDP and TCP sockets. However, in all of the above scenarios, the operating system's networking stack hides all the underlying complexity of constructing and managing IP and TCP headers. Moreover, when writing a TCP socket programming application, you did not care how the reliability is implemented for TCP (although you were familiar with the reliable data transfer mechanisms such as sequence numbers, acknowledgement numbers, checksum, and retransmissions). 
+
+
+Secure Reliable File Transfer (SRFT)
+Your task is to write a client program called SRFT_UDPClient that takes a filename as input. Then, the client program sends the filename to a UDP web server to request its download. The web server program is called SRFT_UDPServer. Your client and server programs must use SOCK_RAW as the type of their sockets, that is, you are responsible for building the IP and UDP headers in each packet.
+
+
+As you know, UDP does not provide reliable data transfer and you cannot guarantee that the received file is the same as the sent file. This means that the file may have been modified in transit (e.g., some bits may be corrupted, some chunks may be lost, etc.). Therefore, the goal of this project is to provide secure and reliable file transfer for a file of any size and any type using UDP. 
+
+
+Phase1: Reliable File Transfer
+You need to implement the following error control mechanisms:
+* Checksum (no need to include the pseudo header, detect corrupted packets)
+* Sequence Numbers (to detect duplicates and re-order packets)
+* Cumulative Acknowledgement numbers (you must avoid sending an ack per packet)
+* Retransmission due to timeout (you can use a fixed value for timeout interval, no need to use the weighted average formula)
+Your server program should produce a text output file and reports the results using the following format:
+* Name of the transferred file:
+* Size of the transferred file:
+* The number of packets sent from the server: <count>
+* The number of retransmitted packets from the server: <count>
+* The number of packets received from the client: <count>
+* The time duration of the file transfer (hh:min:ss):
+It is highly recommended that you finish Phase1 by mid-March. 
+Phase2: Secure and Reliable File Transfer
+In addition to reliability, your protocol must provide secure file transfer. Your implemented protocol in Phase1 does not provide confidentiality, integrity (limited to checksum), or authentication, so an attacker on the network could (1) read file contents, (2) modify packets in transit, (3) inject forged packets, or (4) replay old packets. Your task is to add a security layer above UDP (inside the UDP payload) while still using SOCK_RAW and constructing IP and UDP headers manually.
+Your secure extension must provide the following properties:
+1. Confidentiality: File contents must be encrypted in transit.
+
+2. Integrity: Any tampering with packets must be detected.
+
+3. Authentication: Client and server must authenticate each other to prevent packet injection by third parties.
+
+4. Replay protection: Old packets must not be accepted if replayed.
+
+Key Management (Pre-Shared Key)
+You will use a pre-shared key (PSK) known to both the client and server. The PSK may be stored in a configuration file.
+Example: PSK = b"replace-with-32+bytes-random-key"
+Security Handshake (Session Establishment)
+Before the file transfer begins, the client and server must perform a short handshake to establish a fresh session and derive per-session keys from the PSK.
+   1. ClientHello (Client → Server)
+
+      * Client generates a random client_nonce (e.g., 16 bytes).
+      * Client sends client_nonce and protocol version/cipher info.
+      * Client includes an HMAC (Hash-based Message Authentication Code) computed using the PSK over the handshake fields.
+
+         2. ServerHello (Server → Client)
+
+            * Server verifies the client HMAC.
+            * Server generates a random server_nonce (e.g., 16 bytes) and a random session_id (e.g., 8 bytes).
+            * Server replies with server_nonce, session_id, and an HMAC using the PSK.
+After the handshake, both sides derive session keys using a Key Derivation Function (KDF), e.g., HKDF-SHA256:
+            * enc_key It is used to encrypt and authenticate data packets using Authenticated Encryption with Associated Data (AEAD).
+
+            * optionally ack_key (used to authenticate ACK-only packets if you choose not to encrypt ACKs)
+
+If any handshake HMAC verification fails, the connection must be rejected.
+Secure Packet Protection (AEAD Encryption)
+All file DATA packets must be protected using an authenticated-encryption scheme such as AES-GCM (AEAD):
+               * Each DATA packet uses a unique nonce/IV (e.g., 12 bytes for AES-GCM).
+
+               * The encryption must authenticate the packet metadata using AAD (Additional Authenticated Data) so attackers cannot alter control fields without detection.
+
+At minimum, the following fields must be authenticated (as AAD):
+                  * Session_id
+                  * Sequence_number
+                  * ack_number (if present)
+                  * flags/type
+If decryption/authentication fails for a received packet, the receiver must treat it as invalid and discard it (it must not be delivered to the file output).
+You should encrypt/authenticate ACK packets with the same AEAD mechanism as DATA packets.
+
+Replay Protection
+Your receiver must implement replay protection using sequence numbers or authenticated packets:
+                  * Reject packets with sequence numbers that have already been accepted and written (or already buffered as received).
+
+                  * Packets outside the receiver window may be discarded.
+End-to-End File Verification (Required)
+To ensure the entire file was correctly received, the server and client must verify a final file digest:
+                     * The sender computes SHA-256(file_bytes) and sends it in a final control packet protected by AEAD.
+
+                     * The receiver computes SHA-256 on the reconstructed file and compares digests.
+
+                     * The transfer is “successful” only if the digests match.
+
+Your updated server program for Phase2 should produce a text output file and reports the results using the following format:
+                        * Name of the transferred file:
+                        * Size of the transferred file:
+                        * The number of packets sent from the server: <count>
+                        * The number of retransmitted packets from the server: <count>
+                        * The number of packets received from the client: <count>
+                        * The time duration of the file transfer (hh:min:ss):
+                        * Security enabled (PSK + AEAD): Yes/No
+                        * Handshake status: Success/Fail
+                        * AEAD authentication failures (invalid packets dropped): <count>
+                        * Replay drops (duplicate/out-of-window packets): <count>
+                        * SHA-256 match: Yes/No
+It is highly recommended that you finish Phase2 before mid-April. 
+ Implementation and Test Requirements
+                        * You need to implement your project using the Python programming language. 
+                        * The file created by your program should be the same as the original file on the web server. To ensure the integrity of file transfer in Phase1, you can test whether your received file and the original are identical by comparing the file that your client program receives and the original one using md5sum command. 
+                        * Make sure that your program is efficient and is able to transfer the file in a reasonable amount of time. You need to use multiprocessing or multithreading to handle the transfer of a large file.
+                        * You should run and test your programs on AWS (free tier) and emulate the packet loss and delay. Please refer to the Appendix at the end of this document.
+                        * Sample test files can be found here. This folder may be updated with more files later.
+Security Test Plan (Required)
+You must demonstrate that the security layer (PSK handshake + AEAD protection) works correctly and fails safely under attack-like conditions. Include screenshots/logs for each test and report the required counters.
+Test 1 — Secure Transfer (Baseline)
+                        * Transfer a small text file and a binary file (e.g., .png or .zip) with security enabled.
+                        * Expected: Handshake = Success, AEAD auth failures = 0, Replay drops = 0, SHA-256 match = Yes.
+Test 2 — Wrong PSK (Authentication Failure)
+                        * Configure the client PSK different from the server PSK and attempt a transfer.
+                        * Expected: Handshake = Fail (connection rejected). No valid file output is produced.
+Test 3 — Tamper Detection (Integrity)
+                        * Modify one in-transit DATA packet (flip two bits, i.e., 0->1, 1->0 in the protected UDP payload) using a built-in attack mode (a script or a test hook in your code).
+                        * Expected: Receiver drops the packet (AEAD authentication failure increments). Transfer either completes correctly via retransmission with SHA-256 match, or fails safely (never writes corrupted plaintext as valid data).
+Test 4 — Replay Protection
+                        * Capture one valid DATA packet and resend it later (duplicate/replay) using a built-in attack mode.
+                        * Expected: Packet is rejected as duplicate/out-of-window (Replay drops increments). Final SHA-256 match remains Yes.
+Test 5 — Forged Injection
+                        * Inject one random/forged DATA packet (random bytes or invalid tag). Use a built-in attack mode.
+                        * Expected: Receiver rejects it (AEAD authentication failure increments). Transfer remains correct (SHA-256 match) or fails safely.
+Built-in attack mode: Add a command-line flag like --attack tamper / --attack replay / --attack inject and implement a small forwarder module inside your server (store one packet and resend it later).
+
+
+NOTE: 
+                        * You can use online resources as a reference, but they must be referenced/cited in your Readme file. Do not just copy and paste code from these resources. 
+                        * You should not use AI assistant tools such as ChapGPT to write the code for your project. However, you are allowed to use such tools to debug the errors in your code and solve the issues if you could not solve them as a team after discussion. If you use AI assistant tools, you need to explain in your README the problems/issues that were solved with it and how they were solved. Include the lessons you learned from AI tools as your new code review buddy.
+
+
+Submission Requirements
+                        1. No late submissions allowed.
+                        2. This is a group assignment. All code must be written by the group members only. I encourage you to discuss and share ideas with your classmates but remember to write your own code! 
+
+
+Deliverables and Milestones:
+ 
+                        1. The group members are expected to work with each other collaboratively and meet at least once a week to discuss the project. There will be bi-weekly meetings with a TA to check on each group’s progress.
+                        2. Final demo of the project in class (April 21st and/or April 22nd)
+                        * Demo involves presenting your application programs to the instructional team as well as answering questions about your project (as a group as well as individually). 
+                        3. Final submission on Canvas: April 22ndth, 11:59 PM (PDT)
+                        * Project documentation (a zip file) that includes the following:
+                        * README: Include a Readme file that describes how to run your application, how your application works and if there are any errors or use cases that have limitations or if it doesn't meet any of the requirements. This is also the spot where you want to document any features that you may or may not have implemented. Moreover,  it should summarize the design and key functionalities of your application programs and any features that you have implemented, lessons learned, possible future improvements, etc. This will help me keep an eye out for them as I grade your work.
+                        * Meeting notes: You need to document your meetings (date/time/agenda/conclusions) and put them as a part of the project documentation to ensure every team member has participated.  A minimum of one meeting (online/in-person) per week is required among the group members to discuss the project in addition to the time you may spend together working on the code, etc. Create a Google doc for this and provide the link in your submission. Make sure that it has proper access settings.
+                        * Your project management tool / project log book (such as Trello, Kanban, Google Doc, etc.) to  keep record of the tasks and  your progress. Provide the link in your submission. Make sure that it has proper access settings.
+                        * All of the source files.
+                        * Screenshots of the output for different test cases.
+
+
+
+
+
+
+
+
+Grading
+The project is marked out of 25. The marking rubric is as follows:
+                        1. Correctly format and comment your code. Use good function names and variable names.  Structure/design your classes/functions to maximize code reuse, make your code readable and maintainable. 2 marks
+                        2.  Handle different errors as well as unexpected user behavior (input validation, exception handling, etc.).  2 marks
+                        3. Project documentation.   4 marks
+                        4. Successful implementation and testing of Phase1. This means successful file transfer with packet loss (2% to 4%) using retransmission due to timeout, checksum, seq #, ack#.  Moreover, successful file transfer  involves having the same hash (using md5sum) at both client and server side as well as having a reasonable time for file transfer (efficiency) in the presence of packet loss or a large file.  6 marks
+                        5. Successful implementation and testing of Phase2.  This involves developing and testing the security layer, i.e, secure and reliable file transfer.  6 marks
+                        6. Final demo to the instructional team.  5 marks
+                        * Individual member evaluation by the instructor: 2 marks
+                        * Group demo evaluation by the instructor: 3 marks
+Concluding Thoughts
+Remember to approach your code in an object-oriented/structured fashion. Don't just start bashing out code and hoping that it will all work out. Take a planned approach. Moreover, it is a good idea to select a team lead for your group and they should be in charge of organizing and scheduling meetings between group members, making sure that your group is on track, and they can be the one communicating with the instructional team if there are questions on behalf of your group.
+ Good luck! 
+
+
+Appendix
+Testing your application and simulating packet loss:
+ Make sure you have an AWS account (free tier, no need to pay).
+1.         Creating EC2 Instance on AWS:
+Create two EC2 instances on AWS using the free tier. Make sure the SSH is open for both (it should be the default). You may refer to this guide if you are not familiar with creating EC2 instances. Make sure you create a key pair. The same key pair can be used for both instances.
+Resources:
+https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EC2_GetStarted.html
+or
+https://www.guru99.com/creating-amazon-ec2-instance.html  (up to Create a EIP and connect to your instance).
+ 
+2.         SSH to EC2 instance from Linux/Mac:
+https://www.youtube.com/watch?v=8UqtMcX_kg0
+or
+SSH to EC2 instance from Windows:
+https://www.youtube.com/watch?v=jv-dgOfFN4o
+ 
+generally:   ssh -i keyfile.pem ec2-user@PublicIPAddr
+ 
+3.         Enable Ping response on both EC2 instances:
+https://www.serverkaka.com/2018/03/ping-aws-ec2-instance.html
+Both EC2 instances should be able to ping each other by using each other’s private IP addresses. 
+4.         Install  tc (traffic control) on the EC2 instance on which you plan to run the client program:
+yum install iproute-tc 
+5.         Apply between 2% to 4% packet loss to the network interface of the client EC2 instance:
+sudo tc qdisc add dev eth0 root netem loss 3%
+
+
+(In case you want to remove packet loss: sudo tc qdisc del dev enX0 root )
+To make sure the packet loss work properly, from the other EC2 instance, ping this EC2 machine using its private address.
+example: ping IP addr -c 20
+you will see the results of ping and the packet loss should be <=10%
+ 
+6.         You need to open the UDP port (that you use in your program) or generally UDP traffic on both EC2 instances (inbound and outbound).
+7.         To copy your Python files for client and server to the EC2 machines, use scp command.
+8.         Then, you can start the test: Run both client and server programs and transfer the file.
+ 
+Important notes:
+                        * Make sure you stop the instances at the end of your tests.
+                        * Also, at the end of the term and after the demo, terminate your instances.
+                        * Optional: To measure the UDP throughput between EC2 instances, you can install iperf on both and open the ports that you want to use.
+https://repost.aws/knowledge-center/network-throughput-benchmark-linux-ec2
+https://medium.com/@mertcal/installing-and-using-iperf-for-testing-network-throughput-performance-on-amazon-ec2-instances-f6639ff7c211
+
+
+                        * Make sure you use md5 hash at sender (before sending the file) and at receiver (after receiving the file). The created hashes must be the same.
+Instructions can be found below:
+https://portal.nutanix.com/page/documents/kbs/details?targetId=kA07V000000LWYqSAO
+https://www.geeksforgeeks.org/md5sum-linux-command/
