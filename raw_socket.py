@@ -22,8 +22,14 @@ def create_sockets():
     send_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
     send_sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
+    # Increase send buffer for better throughput with large files
+    send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)  # 4MB
+
     # IPPROTO_UDP: receives all UDP traffic arriving at this machine
     recv_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
+
+    # Increase receive buffer to handle high packet rate
+    recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)  # 4MB
 
     return send_sock, recv_sock
 

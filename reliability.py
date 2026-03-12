@@ -17,10 +17,14 @@ class SendWindow:
 
     Shared between Send Thread and ACK Recv Thread.
     All methods acquire self.lock before touching internal state.
+
+    Uses lazy loading: reads chunks from file on-demand instead of loading all into memory.
     """
 
-    def __init__(self, chunks, window_size=16, timeout_ms=500):
-        self.chunks       = chunks       # [(0, bytes), (1, bytes), ...]
+    def __init__(self, filepath, chunk_size, total_chunks, window_size=64, timeout_ms=500):
+        self.filepath     = filepath     # path to file for lazy reading
+        self.chunk_size   = chunk_size   # bytes per chunk
+        self.total_chunks = total_chunks # total number of chunks
         self.window_size  = window_size
         self.timeout_ms   = timeout_ms
 
@@ -36,6 +40,16 @@ class SendWindow:
 
         self.lock         = Lock()
 
+    def read_chunk(self, seq):
+        """
+        Read a specific chunk from file on-demand.
+        Thread-safe: multiple threads can call this concurrently.
+        """
+        with open(self.filepath, 'rb') as f:
+            f.seek(seq * self.chunk_size)
+            chunk_data = f.read(self.chunk_size)
+        return chunk_data
+
     def get_next_to_send(self):
         """
         Return (seq, chunk) for the next packet to send, or None if nothing to send.
@@ -48,18 +62,20 @@ class SendWindow:
         with self.lock:
             # Scan window for packets needing (re)transmission
             for seq in range(self.window_base, self.window_base + self.window_size):
-                if seq >= len(self.chunks):
+                if seq >= self.total_chunks:
                     break
                 # Not in sent_times means: never sent, or timed out and deleted
                 if seq not in self.sent_times and seq not in self.acked:
-                    return (seq, self.chunks[seq][1])
+                    chunk_data = self.read_chunk(seq)
+                    return (seq, chunk_data)
 
             # Send new packet if window has room
             if (self.next_seq - self.window_base < self.window_size
-                    and self.next_seq < len(self.chunks)):
+                    and self.next_seq < self.total_chunks):
                 seq = self.next_seq
                 self.next_seq += 1
-                return (seq, self.chunks[seq][1])
+                chunk_data = self.read_chunk(seq)
+                return (seq, chunk_data)
 
             return None
 
@@ -104,7 +120,7 @@ class SendWindow:
     def all_acked(self):
         """Return True when every chunk has been acknowledged."""
         with self.lock:
-            return self.window_base >= len(self.chunks)
+            return self.window_base >= self.total_chunks
 
     def get_stats(self):
         """Return transfer statistics for the final report."""

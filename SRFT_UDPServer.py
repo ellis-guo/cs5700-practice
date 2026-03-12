@@ -15,7 +15,8 @@ from constants    import REQUEST, DATA, ACK, FIN, FIN_ACK
 from packet       import build_packet, parse_packet
 from raw_socket   import create_sockets, send, recv
 from reliability  import SendWindow
-from file_handler import find_file, split_file, compute_md5
+from file_handler import find_file, compute_md5
+import os
 
 # ---------------------------------------------------------------------------
 # Config
@@ -26,8 +27,8 @@ SERVER_PORT = 9999
 FILES_DIR   = "./server_files"
 
 CHUNK_SIZE  = 1024
-WINDOW_SIZE = 16
-TIMEOUT_MS  = 500
+WINDOW_SIZE = 64   # Increased for better throughput
+TIMEOUT_MS  = 1000  # Increased timeout for reliability
 
 FIN_RETRIES = 5
 FIN_TIMEOUT = 2.0
@@ -38,6 +39,8 @@ FIN_TIMEOUT = 2.0
 # ---------------------------------------------------------------------------
 
 def send_thread(send_sock, window, client_ip, client_port, stop_event):
+    last_progress = -1
+
     while not stop_event.is_set():
         window.check_timeouts()
 
@@ -57,6 +60,12 @@ def send_thread(send_sock, window, client_ip, client_port, stop_event):
         )
         send(send_sock, packet, client_ip)
         window.mark_sent(seq)
+
+        # Progress display (every 10%)
+        progress = int((window.window_base / window.total_chunks) * 100)
+        if progress // 10 > last_progress // 10:
+            print(f"[Server] Progress: {progress}% ({window.window_base}/{window.total_chunks} chunks acked)")
+            last_progress = progress
 
         if window.all_acked():
             break
@@ -137,7 +146,8 @@ def main():
 
         try:
             filepath     = find_file(filename, FILES_DIR)
-            chunks, total_size, total_chunks = split_file(filepath, CHUNK_SIZE)
+            total_size   = os.path.getsize(filepath)
+            total_chunks = (total_size + CHUNK_SIZE - 1) // CHUNK_SIZE  # ceil division
             original_md5 = compute_md5(filepath)
         except (FileNotFoundError, ValueError) as e:
             print(f"[Server] Error: {e}")
@@ -145,7 +155,7 @@ def main():
 
         print(f"[Server] Sending '{filename}' — {total_chunks} chunks, {total_size} bytes")
 
-        window     = SendWindow(chunks, WINDOW_SIZE, TIMEOUT_MS)
+        window     = SendWindow(filepath, CHUNK_SIZE, total_chunks, WINDOW_SIZE, TIMEOUT_MS)
         stop_flag  = threading.Event()
         start_time = time.time()
 
