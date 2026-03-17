@@ -3,15 +3,16 @@ SRFT_UDPServer.py
 Orchestrates file transfer using Modules A, B, C, D.
 
 Usage:
-    sudo python3 SRFT_UDPServer.py
+    sudo python3 SRFT_UDPServer.py [--ip IP] [--port PORT] [--files-dir DIR]
 """
 
+import argparse
 import threading
 import time
 import struct
 import socket
 
-from constants    import REQUEST, DATA, ACK, FIN, FIN_ACK
+from constants    import REQUEST, DATA, ACK, FIN, FIN_ACK, START
 from packet       import build_packet, parse_packet
 from raw_socket   import create_sockets, send, recv
 from reliability  import SendWindow
@@ -19,12 +20,12 @@ from file_handler import find_file, compute_md5
 import os
 
 # ---------------------------------------------------------------------------
-# Config
+# Default Config (can be overridden by command-line arguments)
 # ---------------------------------------------------------------------------
 
-SERVER_IP   = "127.0.0.1"
-SERVER_PORT = 9999
-FILES_DIR   = "./server_files"
+DEFAULT_SERVER_IP   = "127.0.0.1"
+DEFAULT_SERVER_PORT = 9999
+DEFAULT_FILES_DIR   = "./server_files"
 
 CHUNK_SIZE  = 1024
 WINDOW_SIZE = 64   # Increased for better throughput
@@ -38,7 +39,7 @@ FIN_TIMEOUT = 2.0
 # Thread: send data packets
 # ---------------------------------------------------------------------------
 
-def send_thread(send_sock, window, client_ip, client_port, stop_event):
+def send_thread(send_sock, window, server_ip, server_port, client_ip, client_port, stop_event):
     last_progress = -1
 
     while not stop_event.is_set():
@@ -54,8 +55,8 @@ def send_thread(send_sock, window, client_ip, client_port, stop_event):
 
         seq, chunk = result
         packet = build_packet(
-            SERVER_IP, client_ip,
-            SERVER_PORT, client_port,
+            server_ip, client_ip,
+            server_port, client_port,
             DATA, seq, 0, chunk
         )
         send(send_sock, packet, client_ip)
@@ -75,7 +76,7 @@ def send_thread(send_sock, window, client_ip, client_port, stop_event):
 # Thread: receive ACK packets (dedicated socket)
 # ---------------------------------------------------------------------------
 
-def ack_recv_thread(ack_sock, window, client_ip, client_port, stop_event):
+def ack_recv_thread(ack_sock, window, server_port, client_ip, client_port, stop_event):
     ack_sock.settimeout(0.5)
 
     while not stop_event.is_set():
@@ -89,9 +90,9 @@ def ack_recv_thread(ack_sock, window, client_ip, client_port, stop_event):
         pkt = parse_packet(raw)
         if pkt is None:
             continue
-        if pkt["dst_port"] != SERVER_PORT:
+        if pkt["dst_port"] != server_port:
             continue
-        if not pkt["checksum_valid"]:
+        if not pkt["checksum_valid"] or not pkt["udp_checksum_valid"]:
             continue
         if pkt["pkt_type"] != ACK:
             continue
@@ -109,6 +110,45 @@ def ack_recv_thread(ack_sock, window, client_ip, client_port, stop_event):
 # ---------------------------------------------------------------------------
 
 def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="SRFT UDP Server - Reliable file transfer over raw UDP sockets",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Example: sudo python3 SRFT_UDPServer.py --ip 0.0.0.0 --port 8888"
+    )
+    parser.add_argument('--ip', type=str, default=DEFAULT_SERVER_IP,
+                        help=f'Server IP address (default: {DEFAULT_SERVER_IP})')
+    parser.add_argument('--port', type=int, default=DEFAULT_SERVER_PORT,
+                        help=f'Server port (default: {DEFAULT_SERVER_PORT})')
+    parser.add_argument('--files-dir', type=str, default=DEFAULT_FILES_DIR,
+                        help=f'Directory containing files to serve (default: {DEFAULT_FILES_DIR})')
+    args = parser.parse_args()
+
+    # Validate arguments
+    SERVER_IP = args.ip
+    SERVER_PORT = args.port
+    FILES_DIR = args.files_dir
+
+    # Validate port range
+    if not (1 <= SERVER_PORT <= 65535):
+        print(f"[Server] Error: Invalid port {SERVER_PORT}. Must be 1-65535.")
+        return
+
+    # Validate IP address format
+    try:
+        socket.inet_aton(SERVER_IP)
+    except socket.error:
+        print(f"[Server] Error: Invalid IP address '{SERVER_IP}'")
+        return
+
+    # Validate files directory
+    if not os.path.exists(FILES_DIR):
+        print(f"[Server] Error: Files directory '{FILES_DIR}' does not exist")
+        return
+    if not os.path.isdir(FILES_DIR):
+        print(f"[Server] Error: '{FILES_DIR}' is not a directory")
+        return
+
     send_sock, recv_sock = create_sockets()
 
     # Dedicated socket for receiving ACKs during transfer
@@ -116,6 +156,7 @@ def main():
     ack_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
 
     print(f"[Server] Listening on {SERVER_IP}:{SERVER_PORT} ...")
+    print(f"[Server] Serving files from: {FILES_DIR}")
 
     while True:
 
@@ -130,7 +171,7 @@ def main():
                 continue
             if pkt["dst_port"] != SERVER_PORT:
                 continue
-            if not pkt["checksum_valid"]:
+            if not pkt["checksum_valid"] or not pkt["udp_checksum_valid"]:
                 continue
             if pkt["pkt_type"] != REQUEST:
                 continue
@@ -155,29 +196,54 @@ def main():
 
         print(f"[Server] Sending '{filename}' — {total_chunks} chunks, {total_size} bytes")
 
-        window     = SendWindow(filepath, CHUNK_SIZE, total_chunks, WINDOW_SIZE, TIMEOUT_MS)
+        try:
+            window     = SendWindow(filepath, CHUNK_SIZE, total_chunks, WINDOW_SIZE, TIMEOUT_MS)
+        except IOError as e:
+            print(f"[Server] Error creating send window: {e}")
+            continue
+
         stop_flag  = threading.Event()
         start_time = time.time()
 
+        # ── Send START packet to inform client of total chunks ──────────
+
+        start_data = struct.pack("!I", total_chunks)
+        start_pkt = build_packet(
+            SERVER_IP, client_ip,
+            SERVER_PORT, client_port,
+            START, 0, 0, start_data
+        )
+
+        # Send START with retry (in case of packet loss)
+        for attempt in range(3):
+            send(send_sock, start_pkt, client_ip)
+            time.sleep(0.05)  # Small delay between retries
+
+        print(f"[Server] Sent START packet — total chunks: {total_chunks}")
+
         # ── Phase 2: transfer ─────────────────────────────────────────────
 
-        t_send = threading.Thread(
-            target=send_thread,
-            args=(send_sock, window, client_ip, client_port, stop_flag),
-            daemon=True
-        )
-        t_ack = threading.Thread(
-            target=ack_recv_thread,
-            args=(ack_sock, window, client_ip, client_port, stop_flag),
-            daemon=True
-        )
+        try:
+            t_send = threading.Thread(
+                target=send_thread,
+                args=(send_sock, window, SERVER_IP, SERVER_PORT, client_ip, client_port, stop_flag),
+                daemon=True
+            )
+            t_ack = threading.Thread(
+                target=ack_recv_thread,
+                args=(ack_sock, window, SERVER_PORT, client_ip, client_port, stop_flag),
+                daemon=True
+            )
 
-        t_send.start()
-        t_ack.start()
-        t_send.join()
-        t_ack.join()
+            t_send.start()
+            t_ack.start()
+            t_send.join()
+            t_ack.join()
 
-        stop_flag.set()
+            stop_flag.set()
+        finally:
+            # Ensure file descriptor is always closed, even if exception occurs
+            window.close()
 
         # ── Phase 3: send FIN, wait for FIN_ACK ──────────────────────────
 

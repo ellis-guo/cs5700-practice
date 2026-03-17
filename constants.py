@@ -17,3 +17,4 @@ DATA    = 1   # Server -> Client: payload = file chunk
 ACK     = 2   # Client -> Server: payload = empty
 FIN     = 3   # Server -> Client: payload = empty
 FIN_ACK = 4   # Client -> Server: payload = empty
+START   = 5   # Server -> Client: payload = total_chunks (4 bytes), sent before data transfer

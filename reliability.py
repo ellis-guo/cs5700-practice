@@ -7,6 +7,7 @@ Server uses SendWindow. Client uses RecvBuffer.
 Both classes are thread-safe via internal Lock.
 """
 
+import os
 import time
 from threading import Lock
 
@@ -22,7 +23,7 @@ class SendWindow:
     """
 
     def __init__(self, filepath, chunk_size, total_chunks, window_size=64, timeout_ms=500):
-        self.filepath     = filepath     # path to file for lazy reading
+        self.filepath     = filepath     # path to file (kept for reference)
         self.chunk_size   = chunk_size   # bytes per chunk
         self.total_chunks = total_chunks # total number of chunks
         self.window_size  = window_size
@@ -40,15 +41,34 @@ class SendWindow:
 
         self.lock         = Lock()
 
+        # Open file descriptor once for thread-safe reads
+        # os.pread() is thread-safe and position-independent
+        try:
+            self.file_fd = os.open(filepath, os.O_RDONLY)
+        except OSError as e:
+            raise IOError(f"Failed to open file '{filepath}': {e}")
+
     def read_chunk(self, seq):
         """
-        Read a specific chunk from file on-demand.
-        Thread-safe: multiple threads can call this concurrently.
+        Read a specific chunk from file on-demand using position-independent read.
+        Thread-safe: os.pread() doesn't modify file offset, safe for concurrent calls.
+
+        Args:
+            seq: sequence number of chunk to read
+
+        Returns:
+            bytes: chunk data (may be shorter than chunk_size for last chunk)
         """
-        with open(self.filepath, 'rb') as f:
-            f.seek(seq * self.chunk_size)
-            chunk_data = f.read(self.chunk_size)
-        return chunk_data
+        offset = seq * self.chunk_size
+
+        try:
+            # os.pread: atomic position-independent read, thread-safe
+            chunk_data = os.pread(self.file_fd, self.chunk_size, offset)
+            return chunk_data
+        except OSError as e:
+            # Log error but return empty bytes to avoid crashing transfer
+            print(f"[SendWindow] Error reading chunk {seq}: {e}")
+            return b""
 
     def get_next_to_send(self):
         """
@@ -131,6 +151,18 @@ class SendWindow:
                 "total_acks":    self.total_acks,
             }
 
+    def close(self):
+        """
+        Close the file descriptor. Should be called after transfer completes.
+        Safe to call multiple times.
+        """
+        if hasattr(self, 'file_fd') and self.file_fd >= 0:
+            try:
+                os.close(self.file_fd)
+                self.file_fd = -1
+            except OSError as e:
+                print(f"[SendWindow] Warning: Failed to close file descriptor: {e}")
+
 
 class RecvBuffer:
     """
@@ -138,6 +170,7 @@ class RecvBuffer:
 
     Shared between Data Recv Thread and ACK Send Thread.
     All methods acquire self.lock before touching internal state.
+    Tracks comprehensive statistics for project report.
     """
 
     def __init__(self):
@@ -146,15 +179,35 @@ class RecvBuffer:
         self.total_chunks = None  # set when FIN is received
         self.lock         = Lock()
 
+        # Statistics counters (thread-safe via lock)
+        self.total_received    = 0  # Total DATA packets received (including duplicates)
+        self.duplicate_count   = 0  # Packets received that were already in buffer
+        self.out_of_order_count = 0  # Packets with seq > expected_seq
+        self.checksum_errors   = 0  # Packets dropped due to checksum failure
+
     def receive_data(self, seq, data):
         """
-        Store an incoming data chunk. Silently discard duplicates.
+        Store an incoming data chunk. Tracks statistics and discards duplicates.
         Advances expected_seq as far as consecutive chunks allow.
+
+        Args:
+            seq: sequence number of the packet
+            data: payload bytes
         """
         with self.lock:
+            self.total_received += 1
+
+            # Check for duplicate
             if seq in self.buffer:
+                self.duplicate_count += 1
                 return  # duplicate, discard
+
+            # Check for out-of-order (arrived before earlier packets)
+            if seq > self.expected_seq:
+                self.out_of_order_count += 1
+
             self.buffer[seq] = data
+
             # Advance expected_seq over any consecutive chunks now in buffer
             while self.expected_seq in self.buffer:
                 self.expected_seq += 1
@@ -179,3 +232,27 @@ class RecvBuffer:
         """Return the buffer dict to Module D for file assembly."""
         with self.lock:
             return dict(self.buffer)
+
+    def record_checksum_error(self):
+        """
+        Record a packet that was dropped due to checksum failure.
+        Called by receive thread when checksum validation fails.
+        """
+        with self.lock:
+            self.checksum_errors += 1
+
+    def get_stats(self):
+        """
+        Return transfer statistics for the final report.
+        Thread-safe.
+
+        Returns:
+            dict with statistics counters
+        """
+        with self.lock:
+            return {
+                "total_received":     self.total_received,
+                "duplicate_count":    self.duplicate_count,
+                "out_of_order_count": self.out_of_order_count,
+                "checksum_errors":    self.checksum_errors,
+            }
