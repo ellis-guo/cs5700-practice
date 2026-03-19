@@ -27,9 +27,9 @@ DEFAULT_SERVER_IP   = "127.0.0.1"
 DEFAULT_SERVER_PORT = 9999
 DEFAULT_FILES_DIR   = "./server_files"
 
-CHUNK_SIZE  = 1024
-WINDOW_SIZE = 64   # Increased for better throughput
-TIMEOUT_MS  = 1000  # Increased timeout for reliability
+CHUNK_SIZE  = 1400
+WINDOW_SIZE = 256
+TIMEOUT_MS  = 300
 
 FIN_RETRIES = 5
 FIN_TIMEOUT = 2.0
@@ -41,9 +41,13 @@ FIN_TIMEOUT = 2.0
 
 def send_thread(send_sock, window, server_ip, server_port, client_ip, client_port, stop_event):
     last_progress = -1
+    last_timeout_check = time.time()
 
     while not stop_event.is_set():
-        window.check_timeouts()
+        now = time.time()
+        if now - last_timeout_check >= 0.1:
+            window.check_timeouts()
+            last_timeout_check = now
 
         result = window.get_next_to_send()
 

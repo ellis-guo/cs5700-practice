@@ -33,7 +33,7 @@ class SendWindow:
         self.next_seq     = 0            # next seq to send for the first time
 
         self.sent_times   = {}           # {seq: timestamp} for timeout detection
-        self.acked        = {}           # {seq: True} for confirmed packets
+        self.ever_sent    = set()        # seqs transmitted at least once
 
         self.total_sent   = 0
         self.total_retrans = 0
@@ -80,32 +80,36 @@ class SendWindow:
           3. None if window is full and no timeouts
         """
         with self.lock:
-            # Scan window for packets needing (re)transmission
-            for seq in range(self.window_base, self.window_base + self.window_size):
-                if seq >= self.total_chunks:
+            # Priority 1: retransmit timed-out packets (only already-sent seqs)
+            seq = None
+            for s in range(self.window_base, min(self.next_seq, self.window_base + self.window_size)):
+                if s >= self.total_chunks:
                     break
-                # Not in sent_times means: never sent, or timed out and deleted
-                if seq not in self.sent_times and seq not in self.acked:
-                    chunk_data = self.read_chunk(seq)
-                    return (seq, chunk_data)
+                if s not in self.sent_times:
+                    seq = s
+                    break
 
-            # Send new packet if window has room
-            if (self.next_seq - self.window_base < self.window_size
-                    and self.next_seq < self.total_chunks):
-                seq = self.next_seq
-                self.next_seq += 1
-                chunk_data = self.read_chunk(seq)
-                return (seq, chunk_data)
+            # Priority 2: send new packet if window has room
+            if seq is None:
+                if (self.next_seq - self.window_base < self.window_size
+                        and self.next_seq < self.total_chunks):
+                    seq = self.next_seq
+                    self.next_seq += 1
 
-            return None
+            if seq is None:
+                return None
+
+        # Disk I/O outside the lock — ack_recv_thread can acquire lock freely
+        return (seq, self.read_chunk(seq))
 
     def mark_sent(self, seq):
         """Record that seq was just transmitted. Distinguishes first send vs retransmit."""
         with self.lock:
-            if seq in self.sent_times:
+            if seq in self.ever_sent:
                 self.total_retrans += 1
             else:
                 self.total_sent += 1
+                self.ever_sent.add(seq)
             self.sent_times[seq] = time.time()
 
     def receive_ack(self, ack_num):
@@ -117,7 +121,6 @@ class SendWindow:
             if ack_num <= self.window_base:
                 return
             for seq in range(self.window_base, ack_num):
-                self.acked[seq] = True
                 self.sent_times.pop(seq, None)
             self.window_base = ack_num
             self.total_acks += 1
@@ -132,7 +135,7 @@ class SendWindow:
         with self.lock:
             timed_out = [
                 seq for seq, t in self.sent_times.items()
-                if seq not in self.acked and now - t > threshold
+                if now - t > threshold
             ]
             for seq in timed_out:
                 del self.sent_times[seq]
@@ -173,10 +176,11 @@ class RecvBuffer:
     Tracks comprehensive statistics for project report.
     """
 
-    def __init__(self):
+    def __init__(self, window_size=256):
         self.buffer       = {}    # {seq: bytes}
         self.expected_seq = 0     # cumulative ACK value = next seq we need
         self.total_chunks = None  # set when FIN is received
+        self.window_size  = window_size
         self.lock         = Lock()
 
         # Statistics counters (thread-safe via lock)
@@ -196,6 +200,10 @@ class RecvBuffer:
         """
         with self.lock:
             self.total_received += 1
+
+            # Discard packets outside receive window
+            if seq >= self.expected_seq + self.window_size:
+                return
 
             # Check for duplicate
             if seq in self.buffer:
