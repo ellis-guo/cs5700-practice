@@ -11,13 +11,15 @@ import threading
 import time
 import struct
 import socket
+import os
+import hashlib
+import hmac
 
-from constants    import REQUEST, DATA, ACK, FIN, FIN_ACK, START
+from constants    import REQUEST, DATA, ACK, FIN, FIN_ACK, START, CHALLENGE, AUTH, AUTH_FAIL
 from packet       import build_packet, parse_packet
 from raw_socket   import create_sockets, send, recv
 from reliability  import SendWindow
 from file_handler import find_file, compute_md5
-import os
 
 # ---------------------------------------------------------------------------
 # Default Config (can be overridden by command-line arguments)
@@ -33,6 +35,19 @@ TIMEOUT_MS  = 300
 
 FIN_RETRIES = 5
 FIN_TIMEOUT = 2.0
+
+AUTH_TIMEOUT  = 5.0   # seconds to wait for AUTH after sending CHALLENGE
+AUTH_RETRIES  = 3     # how many times to resend CHALLENGE before giving up
+
+
+def load_psk():
+    """Load pre-shared key from SRFT_PSK environment variable."""
+    psk = os.environ.get("SRFT_PSK", "")
+    if not psk:
+        print("[Server] Error: SRFT_PSK environment variable not set.")
+        print("[Server] Usage: export SRFT_PSK='your-secret-key'")
+        raise SystemExit(1)
+    return psk.encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +168,8 @@ def main():
         print(f"[Server] Error: '{FILES_DIR}' is not a directory")
         return
 
+    PSK = load_psk()
+
     send_sock, recv_sock = create_sockets()
 
     # Dedicated socket for receiving ACKs during transfer
@@ -186,6 +203,56 @@ def main():
 
             print(f"[Server] REQUEST from {client_ip}:{client_port} — '{filename}'")
             break
+
+        # ── Phase 1b: PSK challenge-response ─────────────────────────────
+
+        auth_ok = False
+        for attempt in range(AUTH_RETRIES):
+            nonce = os.urandom(16)
+            challenge_pkt = build_packet(
+                SERVER_IP, client_ip,
+                SERVER_PORT, client_port,
+                CHALLENGE, 0, 0, nonce
+            )
+            send(send_sock, challenge_pkt, client_ip)
+            print(f"[Server] Sent CHALLENGE (attempt {attempt + 1})")
+
+            recv_sock.settimeout(AUTH_TIMEOUT)
+            try:
+                raw = recv(recv_sock)
+            except Exception:
+                print("[Server] AUTH timeout, resending CHALLENGE...")
+                continue
+
+            pkt = parse_packet(raw)
+            if (pkt is None
+                    or pkt["dst_port"] != SERVER_PORT
+                    or not pkt["checksum_valid"]
+                    or not pkt["udp_checksum_valid"]
+                    or pkt["pkt_type"] != AUTH
+                    or pkt["src_ip"] != client_ip
+                    or pkt["src_port"] != client_port):
+                print("[Server] Unexpected packet during auth, retrying...")
+                continue
+
+            expected = hmac.new(PSK, nonce, hashlib.sha256).digest()
+            if hmac.compare_digest(expected, pkt["data"]):
+                auth_ok = True
+                print("[Server] AUTH successful")
+                break
+            else:
+                print("[Server] AUTH failed: wrong HMAC")
+                break
+
+        if not auth_ok:
+            fail_pkt = build_packet(
+                SERVER_IP, client_ip,
+                SERVER_PORT, client_port,
+                AUTH_FAIL, 0, 0, b""
+            )
+            send(send_sock, fail_pkt, client_ip)
+            print("[Server] Sent AUTH_FAIL, dropping connection")
+            continue
 
         # ── Prepare file ──────────────────────────────────────────────────
 

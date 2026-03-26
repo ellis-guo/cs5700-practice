@@ -11,8 +11,11 @@ import threading
 import time
 import struct
 import sys
+import os
+import hashlib
+import hmac
 
-from constants    import REQUEST, DATA, ACK, FIN, FIN_ACK, START
+from constants    import REQUEST, DATA, ACK, FIN, FIN_ACK, START, CHALLENGE, AUTH, AUTH_FAIL
 from packet       import build_packet, parse_packet
 from raw_socket   import create_sockets, send, recv
 from reliability  import RecvBuffer
@@ -30,6 +33,18 @@ DEFAULT_SAVE_DIR    = "./client_downloads"
 ACK_BATCH_SIZE     = 16      # batch trigger: send ACK every N new packets
 ACK_TIMEOUT        = 0.02    # 20ms timeout trigger for tail packets
 ACK_CHECK_INTERVAL = 0.001   # 1ms polling interval
+
+AUTH_TIMEOUT = 5.0   # seconds to wait for CHALLENGE after sending REQUEST
+
+
+def load_psk():
+    """Load pre-shared key from SRFT_PSK environment variable."""
+    psk = os.environ.get("SRFT_PSK", "")
+    if not psk:
+        print("[Client] Error: SRFT_PSK environment variable not set.")
+        print("[Client] Usage: export SRFT_PSK='your-secret-key'")
+        raise SystemExit(1)
+    return psk.encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +187,8 @@ def main():
     print(f"[Client] Connecting to {SERVER_IP}:{SERVER_PORT}")
     print(f"[Client] Files will be saved to: {SAVE_DIR}")
 
+    PSK = load_psk()
+
     send_sock, recv_sock = create_sockets()
 
     # Determine local IP (used as src_ip in packets)
@@ -186,6 +203,46 @@ def main():
     )
     send(send_sock, req_pkt, SERVER_IP)
     print(f"[Client] Sent REQUEST for '{filename}'")
+
+    # ── Phase 1b: PSK challenge-response ────────────────────────────────
+
+    recv_sock.settimeout(AUTH_TIMEOUT)
+    while True:
+        try:
+            raw = recv(recv_sock)
+        except Exception:
+            print("[Client] Timeout waiting for CHALLENGE, resending REQUEST...")
+            send(send_sock, req_pkt, SERVER_IP)
+            continue
+
+        pkt = parse_packet(raw)
+        if (pkt is None
+                or pkt["dst_port"] != CLIENT_PORT
+                or not pkt["checksum_valid"]
+                or not pkt["udp_checksum_valid"]
+                or pkt["src_ip"] != SERVER_IP
+                or pkt["src_port"] != SERVER_PORT):
+            continue
+
+        if pkt["pkt_type"] == AUTH_FAIL:
+            print("[Client] Server rejected authentication. Check SRFT_PSK.")
+            return
+
+        if pkt["pkt_type"] != CHALLENGE:
+            continue
+
+        nonce = pkt["data"]
+        digest = hmac.new(PSK, nonce, hashlib.sha256).digest()
+        auth_pkt = build_packet(
+            client_ip, SERVER_IP,
+            CLIENT_PORT, SERVER_PORT,
+            AUTH, 0, 0, digest
+        )
+        send(send_sock, auth_pkt, SERVER_IP)
+        print("[Client] Sent AUTH")
+        break
+
+    recv_sock.settimeout(None)
 
     buffer     = RecvBuffer()
     stop_flag  = threading.Event()
@@ -251,7 +308,6 @@ def main():
     mm, ss = divmod(rem, 60)
 
     # Get file size from assembled file
-    import os
     total_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
 
     report = f"""
@@ -272,8 +328,6 @@ Received file MD5:                         {received_md5}
 
     # Save report to file
     try:
-        # Ensure save directory exists
-        import os
         os.makedirs(SAVE_DIR, exist_ok=True)
 
         report_path = f"{SAVE_DIR}/client_report_{filename}.txt"

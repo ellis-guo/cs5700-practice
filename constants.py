@@ -12,9 +12,12 @@ Usage:
 # Packet type constants
 # ---------------------------------------------------------------------------
 
-REQUEST = 0   # Client -> Server: payload = filename
-DATA    = 1   # Server -> Client: payload = file chunk
-ACK     = 2   # Client -> Server: payload = empty
-FIN     = 3   # Server -> Client: payload = empty
-FIN_ACK = 4   # Client -> Server: payload = empty
-START   = 5   # Server -> Client: payload = total_chunks (4 bytes), sent before data transfer
+REQUEST   = 0   # Client -> Server: payload = filename
+DATA      = 1   # Server -> Client: payload = file chunk
+ACK       = 2   # Client -> Server: payload = empty
+FIN       = 3   # Server -> Client: payload = empty
+FIN_ACK   = 4   # Client -> Server: payload = empty
+START     = 5   # Server -> Client: payload = total_chunks (4 bytes), sent before data transfer
+CHALLENGE = 6   # Server -> Client: payload = 16-byte random nonce
+AUTH      = 7   # Client -> Server: payload = 32-byte HMAC-SHA256(PSK, nonce)
+AUTH_FAIL = 8   # Server -> Client: payload = empty, authentication rejected
