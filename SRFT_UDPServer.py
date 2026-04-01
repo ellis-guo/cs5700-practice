@@ -41,12 +41,10 @@ AUTH_RETRIES  = 3     # how many times to resend CHALLENGE before giving up
 
 
 def load_psk():
-    """Load pre-shared key from SRFT_PSK environment variable."""
-    psk = os.environ.get("SRFT_PSK", "")
-    if not psk:
-        print("[Server] Error: SRFT_PSK environment variable not set.")
-        print("[Server] Usage: export SRFT_PSK='your-secret-key'")
-        raise SystemExit(1)
+    """Load pre-shared key from psk.txt file."""
+    psk_file = os.path.join(os.path.dirname(__file__), "psk.txt")
+    with open(psk_file, "r") as f:
+        psk = f.read().strip()
     return psk.encode("utf-8")
 
 
